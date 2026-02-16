@@ -1766,9 +1766,6 @@ let connection = null;
 let searchTimer = null;
 let searchStartTime = 0;
 
-// Simple matchmaking using PeerJS with random pairing
-const MATCHMAKING_PREFIX = 'c4mm-';
-
 function initPeer() {
   // Check if PeerJS is loaded
   if (typeof Peer === 'undefined') {
@@ -1815,6 +1812,10 @@ function initPeer() {
 // ════════════════════════════════════
 //  QUICK PLAY MATCHMAKING
 // ════════════════════════════════════
+const MATCHMAKING_POOL = 'c4-lobby-';
+let matchAttempts = 0;
+const MAX_LOBBY_ID = 5; // Only use 5 lobbies for better chance of matching
+
 async function quickPlay() {
   if (!initPeer()) {
     closeOnlineModal();
@@ -1823,6 +1824,7 @@ async function quickPlay() {
   }
 
   isSearching = true;
+  matchAttempts = 0;
   showSearchingScreen();
   startSearchTimer();
 
@@ -1835,72 +1837,90 @@ async function quickPlay() {
     }
   });
 
-  // Try to connect to random opponents
-  attemptQuickMatch();
+  // Start matching process
+  tryMatchmaking();
 }
 
-function attemptQuickMatch() {
+function tryMatchmaking() {
   if (!isSearching) return;
 
-  // Generate a random matchmaking ID
-  const randomMatch = MATCHMAKING_PREFIX + Math.random().toString(36).substring(2, 8);
-  
-  console.log('Attempting to connect to:', randomMatch);
-  
+  matchAttempts++;
+  console.log('Match attempt:', matchAttempts);
+
+  // Use a fixed pool of lobby IDs (0-4) for better matching
+  const lobbyNum = Math.floor(Math.random() * MAX_LOBBY_ID);
+  const targetLobby = MATCHMAKING_POOL + lobbyNum;
+
+  console.log('Trying to connect to:', targetLobby);
+
+  // Try to connect to this lobby
   try {
-    const conn = peer.connect(randomMatch, {
+    const conn = peer.connect(targetLobby, {
       reliable: true,
-      metadata: { matchmaking: true }
+      metadata: { quickPlay: true }
     });
 
+    let connectionTimeout = setTimeout(() => {
+      console.log('Connection timeout, trying to host instead');
+      conn.close();
+      hostLobby();
+    }, 3000); // Wait 3 seconds
+
     conn.on('open', () => {
+      clearTimeout(connectionTimeout);
       if (!isSearching) {
         conn.close();
         return;
       }
       
+      console.log('Connected to lobby!');
       connection = conn;
       setupConnection();
-      matchFound();
       onlinePlayerNumber = 2; // Connector is player 2
+      matchFound();
     });
 
     conn.on('error', (err) => {
-      // No peer available, try again or create lobby
-      if (isSearching) {
-        setTimeout(() => {
-          // Alternate between trying to connect and hosting
-          if (Math.random() > 0.5) {
-            attemptQuickMatch();
-          } else {
-            createMatchmakingLobby();
-          }
-        }, 1000);
-      }
+      clearTimeout(connectionTimeout);
+      console.log('Connection failed, will host lobby');
+      // Connection failed, try hosting instead
+      hostLobby();
     });
 
   } catch (err) {
-    console.error('Match attempt failed:', err);
-    if (isSearching) {
-      setTimeout(() => createMatchmakingLobby(), 1000);
-    }
+    console.error('Match attempt error:', err);
+    hostLobby();
   }
 }
 
-function createMatchmakingLobby() {
+function hostLobby() {
   if (!isSearching || !peer) return;
 
-  // Recreate peer with matchmaking ID
-  const matchId = MATCHMAKING_PREFIX + Math.random().toString(36).substring(2, 8);
-  
+  // Pick a random lobby number
+  const lobbyNum = Math.floor(Math.random() * MAX_LOBBY_ID);
+  const lobbyId = MATCHMAKING_POOL + lobbyNum;
+
+  console.log('Hosting lobby:', lobbyId);
+
+  // Destroy current peer and create new one with lobby ID
   if (peer) peer.destroy();
-  
+
   try {
-    peer = new Peer(matchId);
+    peer = new Peer(lobbyId);
     
     peer.on('open', (id) => {
-      console.log('Created matchmaking lobby:', id);
-      onlinePlayerNumber = 1; // Lobby creator is player 1
+      console.log('Lobby created:', id);
+      onlinePlayerNumber = 1; // Host is player 1
+      
+      // After 5 seconds of hosting, try connecting again
+      if (isSearching) {
+        setTimeout(() => {
+          if (isSearching) {
+            console.log('Switching from host to connect mode');
+            tryMatchmaking();
+          }
+        }, 5000);
+      }
     });
     
     peer.on('connection', (conn) => {
@@ -1909,11 +1929,12 @@ function createMatchmakingLobby() {
         return;
       }
       
+      console.log('Someone connected to our lobby!');
       connection = conn;
       setupConnection();
       matchFound();
       
-      // Send init message
+      // Send player number assignment
       conn.on('open', () => {
         conn.send({ type: 'init', playerNumber: 2 });
       });
@@ -1921,20 +1942,19 @@ function createMatchmakingLobby() {
 
     peer.on('error', (err) => {
       console.error('Lobby error:', err);
-      if (isSearching) {
-        setTimeout(() => attemptQuickMatch(), 1500);
+      if (isSearching && err.type === 'unavailable-id') {
+        // This lobby is taken, try connecting to it instead
+        console.log('Lobby taken, trying to connect');
+        setTimeout(() => {
+          if (isSearching) tryMatchmaking();
+        }, 1000);
       }
     });
-
-    // Try to connect again after waiting
-    setTimeout(() => {
-      if (isSearching) attemptQuickMatch();
-    }, 2000);
 
   } catch (err) {
     console.error('Failed to create lobby:', err);
     if (isSearching) {
-      setTimeout(() => attemptQuickMatch(), 1500);
+      setTimeout(() => tryMatchmaking(), 2000);
     }
   }
 }
